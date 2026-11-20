@@ -221,3 +221,29 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ColdGuard: local files
+etc/
+
+# ColdGuard: credentials
+.env.*
+*.env
+
+# 설정 예시 파일은 Git에 포함
+!.env.example
+!*.env.example
+
+# ColdGuard: runtime state
+state/
+simulator_state/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+
+# ColdGuard: certificates / private keys
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
