@@ -3,6 +3,7 @@ LIMIT = -25.0
 WINDOW = 60.0
 EARLY_SEC = 120.0
 HOLD_SEC = 10.0
+SIM_RISE = 0.04  # 시뮬레이터와 공유하는 문 열림 상승 속도 (°C/초)
 
 def analyze(old, msg, received, stale_sec):
     # 순서가 뒤바뀐 기록은 보관만 하고 최신 상태/추세를 과거로 되돌리지 않는다.
@@ -37,6 +38,10 @@ def analyze(old, msg, received, stale_sec):
         status = "hot"
     elif msg["door"] and (rearm or (risk is not None and msg["ts"] - risk >= HOLD_SEC)):
         status = "early"
+    # 재개방 즉시 경보는 첫 표본에서도 발생한다. 추세가 없을 때만
+    # 시뮬레이터의 알려진 상승 속도로 예측해 null 이벤트를 방지한다.
+    if status == "early" and eta is None:
+        eta = max(0.0, (LIMIT - msg["temp"]) / SIM_RISE)
     if received - msg["ts"] > stale_sec:
         status, risk, eta = "stale", None, None
     state = {**msg, "received": received, "history": history, "risk": risk,
