@@ -31,7 +31,8 @@ SITE = _config['SITE']
 DEVICE = _config['DEVICE']
 LIMIT = -25.0
 REARM_TEMP = -29.5  # 이 온도보다 따뜻할 때 닫은 이력은 재개방 경보에 사용한다.
-RISE = 0.04  # 문이 열리면 온도가 상승 1초에 0.04°C씩 올라간다.
+from common.temperature_analysis import SIM_RISE
+RISE = SIM_RISE  # 예측 계산과 실제 시뮬레이터 상승 속도를 일치시킨다.
 FALL = 0.08
 SWING_SEC = 2.0  # 정상 범위에서는 2초에 0.1°C씩 변화한다.
 IMG_DIR = Path(__file__).resolve().parent.parent / "image"
