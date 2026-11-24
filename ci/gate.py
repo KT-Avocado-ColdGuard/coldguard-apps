@@ -7,6 +7,8 @@ SERVICES = {'collector', 'controller', 'field-web'}
 
 def evaluate(report, exceptions, image_id, today=None):
     today = today or dt.datetime.now(dt.timezone.utc).date()
+    if not isinstance(report, dict):
+        raise ValueError('Report must be an object')
     if report.get('SchemaVersion') != 2 or not isinstance(report.get('Results'), list) or not report['Results']:
         raise ValueError('Missing/unsupported scan results')
     if not isinstance(exceptions, list):
@@ -15,7 +17,7 @@ def evaluate(report, exceptions, image_id, today=None):
     for e in exceptions:
         required = ('id', 'package', 'installed_version', 'target', 'image_id',
                     'approved_by', 'approval_issue', 'reason', 'mitigation', 'expires_at', 'services')
-        if not all(e.get(k) for k in required):
+        if not isinstance(e, dict) or not all(e.get(k) for k in required):
             raise ValueError('Incomplete approval record')
         expiry = dt.date.fromisoformat(e['expires_at'])
         if set(e['services']) != SERVICES:
@@ -24,7 +26,18 @@ def evaluate(report, exceptions, image_id, today=None):
             valid.append(e)
     blocked, waived = [], []
     for result in report['Results']:
-        for v in result.get('Vulnerabilities') or []:
+        if not isinstance(result, dict) or not isinstance(result.get('Target'), str) or not result['Target']:
+            raise ValueError('Invalid scan target')
+        findings = result.get('Vulnerabilities')
+        if findings is None:
+            findings = []
+        if not isinstance(findings, list):
+            raise ValueError('Invalid vulnerabilities')
+        for v in findings:
+            if not isinstance(v, dict) or not all(isinstance(v.get(k), str) and v[k] for k in ('Severity','VulnerabilityID','PkgName','InstalledVersion')):
+                raise ValueError('Invalid vulnerability')
+            if v['Severity'] not in ('UNKNOWN','LOW','MEDIUM','HIGH','CRITICAL'):
+                raise ValueError('Invalid severity')
             if v['Severity'] not in ('HIGH', 'CRITICAL'):
                 continue
             match = any(e['id'] == v['VulnerabilityID'] and e['package'] == v['PkgName']

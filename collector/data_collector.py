@@ -152,10 +152,14 @@ class Metrics:
         self.last = gauge("last_measurement_timestamp_seconds", "마지막 측정 Unix 시각")
         self.fresh = gauge("data_available", "측정 데이터 유효 여부")
         self.alarm = gauge("alarm", "정상 0, 예측 1, 고온 2, 데이터 확인 불가 3")
+        # 장비별 문 상태와 냉각 상태를 모니터링에 제공한다.
+        self.door = gauge("door_open", "문 상태: 열림 1, 닫힘 0; 확인 불가 시 NaN")
+        self.cooling = gauge("cooling", "냉각 상태: 가동 1, 정지 0; 확인 불가 시 NaN")
         self.count = Counter("coldguard_collector_messages_total", "처리 건수", ("result",), registry=self.registry)
         self.db_up = Gauge("coldguard_collector_db_up", "마지막 DB 처리 성공 여부", registry=self.registry)
         self.mqtt_up = Gauge("coldguard_collector_mqtt_up", "MQTT 연결 여부", registry=self.registry)
-        self.unsent = Gauge("coldguard_collector_unsent", "아직 MQTT로 발행되지 않은 이벤트 수", ("site",), registry=self.registry)
+        self.unsent = Gauge("coldguard_collector_unsent_messages", "아직 MQTT로 발행되지 않은 이벤트 수", ("site",), registry=self.registry)
+        self.unsent.labels(cfg["SITE"]).set(float("nan"))
         for device in cfg["DEVICES"]:
             self.update(None, cfg["SITE"], device)
         self.server, self.thread = start_http_server(cfg["METRICS_PORT"], addr=cfg["METRICS_HOST"], registry=self.registry)
@@ -168,6 +172,15 @@ class Metrics:
         self.last.labels(*labels).set(state["ts"] if state else 0)
         self.eta.labels(*labels).set(state["eta"] if valid and state["eta"] is not None else float("nan"))
         self.alarm.labels(*labels).set({"normal": 0, "early": 1, "hot": 2, "stale": 3}[state["status"]] if state else 3)
+
+        # telemetry의 door_open은 내부에서 door라는 이름으로 사용한다.
+        # 데이터가 없거나 오래됐으면 확인 불가를 뜻하는 NaN을 표시한다.
+        self.door.labels(*labels).set(
+            int(state["door"]) if valid else float("nan")
+        )
+        self.cooling.labels(*labels).set(
+            int(state["cooling"]) if valid else float("nan")
+        )
 
 
 def main():
@@ -253,6 +266,7 @@ def main():
                         store.sender.pending_count()
                     )
                 except Exception as exc:
+                    metrics.unsent.labels(cfg['SITE']).set(float('nan'))
                     log('unsent_count_error',error=type(exc).__name__)
 
             except Exception as exc:

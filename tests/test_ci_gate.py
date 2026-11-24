@@ -1,6 +1,7 @@
 import copy
 import datetime as dt
 import unittest
+import sys
 from ci.gate import evaluate
 
 class GateTests(unittest.TestCase):
@@ -32,6 +33,11 @@ class GateTests(unittest.TestCase):
     def test_invalid_scan_fails(self):
         for report in ({}, {'SchemaVersion': 2, 'Results': []}):
             with self.assertRaises(ValueError): evaluate(report, [], 'image')
+
+@unittest.skipUnless(
+    sys.platform.startswith("linux"),
+    "Linux Bash process test; run in WSL or GitHub Actions",
+)
 
 class ScannerProcessTests(unittest.TestCase):
     def test_scanner_and_timeout_errors_preserve_logs(self):

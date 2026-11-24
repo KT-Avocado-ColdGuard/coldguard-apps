@@ -102,6 +102,18 @@ http://실행서버주소:9201/metrics
 
 프로그램 로그는 수집하기 쉬운 한 줄 JSON 형식으로 출력합니다.
 
+`coldguard_freezer_door_open`
+- 라벨: site / device
+- 1: 문 열림
+- 0: 문 닫힘
+- NaN: 데이터 없음 또는 수신 지연
+
+`coldguard_freezer_cooling`
+- 라벨: site / device
+- 1: 냉각 가동
+- 0: 냉각 정지
+- NaN: 데이터 없음 또는 수신 지연
+
 <br />
 
 ## 연동 확인
@@ -112,3 +124,11 @@ http://실행서버주소:9201/metrics
 - 고온 / 조기 경보 / 데이터 수신 중단 이벤트 확인
 - `/metrics` 접근 및 지표 갱신 확인
 - 연결 복구 후 재처리 동작 확인
+
+
+## 미전송 이벤트 지표
+`coldguard_collector_unsent_messages{site="site01"}`는 MySQL event_log 중 collector 담당
+종류(early_warning / high_temp / data_lost)의 발행 커서 이후 행 수입니다.
+전체 telemetry 버퍼가 아닙니다. MQTT 발행 확인 후 영속 커서를 이동하며 실패 시 유지합니다.
+조회 전이나 조회 실패 시 NaN입니다. 재시작 시 같은 STATE_DB를 사용해야 합니다.
+기존 coldguard_collector_unsent에서 이름을 변경했으므로 모니터링 쿼리도 변경해야 합니다.
