@@ -155,6 +155,7 @@ class Metrics:
         self.count = Counter("coldguard_collector_messages_total", "처리 건수", ("result",), registry=self.registry)
         self.db_up = Gauge("coldguard_collector_db_up", "마지막 DB 처리 성공 여부", registry=self.registry)
         self.mqtt_up = Gauge("coldguard_collector_mqtt_up", "MQTT 연결 여부", registry=self.registry)
+        self.unsent = Gauge("coldguard_collector_unsent", "아직 MQTT로 발행되지 않은 이벤트 수", ("site",), registry=self.registry)
         for device in cfg["DEVICES"]:
             self.update(None, cfg["SITE"], device)
         self.server, self.thread = start_http_server(cfg["METRICS_PORT"], addr=cfg["METRICS_HOST"], registry=self.registry)
@@ -247,6 +248,13 @@ def main():
                         store.sender.flush(lambda t,b:publish(client,t,b))
                     except Exception as exc:
                         log('event_publish_retry',error=type(exc).__name__)
+                try:
+                    metrics.unsent.labels(cfg["SITE"]).set(
+                        store.sender.pending_count()
+                    )
+                except Exception as exc:
+                    log('unsent_count_error',error=type(exc).__name__)
+
             except Exception as exc:
                 # 원문/계정이 예외 메시지에 포함될 수 있어 예외 종류만 출력한다.
                 metrics.db_up.set(0)
