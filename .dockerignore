@@ -3,10 +3,9 @@
 **/__pycache__/
 **/*.py[cod]
 
-.env
-.env.*
-*.env
+.env*
 **/*.env
+**/.env*
 
 state/
 **/state/
@@ -24,4 +23,6 @@ state/
 
 *.log
 **/*.log
+
 etc/
+reports/
