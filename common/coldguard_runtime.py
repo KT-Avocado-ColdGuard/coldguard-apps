@@ -153,6 +153,22 @@ class EventSender:
             with self.state:
                 self.state.execute('UPDATE event_cursor SET last=? WHERE id=1',(r['id'],))
 
+    def pending_count(self):
+        last = self.state.execute(
+            'SELECT last FROM event_cursor WHERE id=1'
+        ).fetchone()[0]
+
+        placeholders = ','.join(['%s'] * len(self.types))
+
+        rows = self.db.query(
+            'SELECT COUNT(*) AS total FROM event_log '
+            'WHERE site_id=%s AND id>%s '
+            f'AND event_type IN ({placeholders})',
+            (self.site, last, *self.types)
+        )
+
+        return int(rows[0]['total'])
+
 
 def mqtt_client(cfg):
     import paho.mqtt.client as mqtt
