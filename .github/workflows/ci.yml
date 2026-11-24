@@ -83,8 +83,19 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
           role-session-name: coldguard-ci-${{ github.run_id }}
+
+      - name: Verify authenticated AWS account
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          actual_account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [ "$actual_account_id" != "$EXPECTED_ACCOUNT_ID" ]; then
+            echo "::error::Authenticated AWS account does not match AWS_ACCOUNT_ID."
+            exit 1
+          fi
 
       - name: Publish approved image to ECR repositories
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
