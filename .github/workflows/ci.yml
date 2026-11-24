@@ -129,7 +129,24 @@ jobs:
             persist-credentials: false
             ref: main
 
+        - name: Check trusted notification script
+          id: notification
+          env:
+            EVENT_NAME: ${{ github.event_name }}
+          run: |
+            if [ -f ci/discord.py ]; then
+              echo "ready=true" >> "$GITHUB_OUTPUT"
+            elif [ "$EVENT_NAME" = "pull_request" ]; then
+              echo "::warning::Discord notification skipped: ci/discord.py is not yet on main."
+              echo "Discord notification skipped because the trusted script is not yet on main." >> "$GITHUB_STEP_SUMMARY"
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Trusted notification script ci/discord.py is missing on main."
+              exit 1
+            fi
+
         - name: Send CI result
+          if: steps.notification.outputs.ready == 'true'
           env:
             DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
             CI_RESULT: ${{ needs.test-build-scan.result }}
