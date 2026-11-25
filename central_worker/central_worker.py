@@ -10,6 +10,8 @@
 - 모니터링용 /metrics를 제공합니다.
 - 여러 개(HPA 2~4)로 실행합니다. 파드마다 클라이언트 ID가 다르고(StatefulSet 파드 이름),
   기본 개수 밖의 파드(늘어났다 줄어드는 파드)는 종료 전에 구독을 해제하고 받은 메시지를 모두 처리합니다.
+- 회수 모드(DRAIN_ONLY=true): 지정한 파드 ID의 세션에 남은 메시지만 저장하고 끝냅니다.
+  DB 장애 중 HPA가 줄인 파드가 메시지를 다 처리하지 못하고 끝났을 때(drain_timeout) 씁니다.
 - 실행: python -m central_worker.central_worker
 """
 import json
@@ -63,6 +65,7 @@ def settings(env=None):
         FUTURE_SKEW_SEC=env.get('FUTURE_SKEW_SEC', '300'),
         STABLE_REPLICAS=env.get('STABLE_REPLICAS', '2'),
         DRAIN_SEC=env.get('DRAIN_SEC', '40'),
+        DRAIN_ONLY=env.get('DRAIN_ONLY', 'false'),
     )
     missing = [k for k, v in cfg.items() if not str(v).strip()]
     if missing:
@@ -78,6 +81,13 @@ def settings(env=None):
     cfg['DRAIN_SEC'] = float(cfg['DRAIN_SEC'])
     if cfg['STABLE_REPLICAS'] < 1 or not cfg['DRAIN_SEC'] > 0:
         raise ValueError('STABLE_REPLICAS는 1 이상, DRAIN_SEC는 0보다 커야 합니다.')
+    flag = str(cfg['DRAIN_ONLY']).strip().lower()
+    if flag not in ('true', 'false'):
+        raise ValueError('DRAIN_ONLY는 true 또는 false로 지정하세요.')
+    cfg['DRAIN_ONLY'] = flag == 'true'
+    if cfg['DRAIN_ONLY'] and 'MQTT_CLIENT_ID' not in env:
+        # 회수할 세션을 반드시 명시한다(예: central-worker-3). 기본값으로 엉뚱한 세션을 건드리지 않게 한다.
+        raise ValueError('회수 모드는 MQTT_CLIENT_ID에 회수할 파드 이름을 지정해야 합니다.')
     cfg['DRAIN_ON_STOP'] = drain_on_stop(cfg['MQTT_CLIENT_ID'], cfg['STABLE_REPLICAS'])
     cfg['TOPICS'] = [f'$share/{SHARE_GROUP}/coldguard/+/+/{c}' for c in CHANNELS]
     return cfg
@@ -310,12 +320,23 @@ def main():
     store, metrics = Store(cfg), Metrics(cfg)
     client = mqtt_client(cfg)
 
-    state = {'draining': False}
+    # draining: 새 메시지를 받지 않고 남은 메시지만 처리하는 중
+    # last: 마지막으로 메시지를 꺼낸(또는 접속한) 시각. 3초간 조용하면 다 비운 것으로 본다.
+    state = {'draining': cfg['DRAIN_ONLY'], 'connected': False, 'last': now()}
+    deadline = now() + cfg['DRAIN_SEC'] if cfg['DRAIN_ONLY'] else 0.0
+    if cfg['DRAIN_ONLY']:
+        log('recover_start', client_id=cfg['MQTT_CLIENT_ID'])
 
     def connected(c, userdata, flags, reason, properties):
         metrics.mqtt_up.set(0 if reason.is_failure else 1)
-        if not reason.is_failure and not state['draining']:
-            c.subscribe([(t, 1) for t in cfg['TOPICS']])
+        if not reason.is_failure:
+            if not state['draining']:
+                c.subscribe([(t, 1) for t in cfg['TOPICS']])
+            elif cfg['DRAIN_ONLY']:
+                # 회수 모드: 세션에 남은 구독도 해제해 새 메시지가 더 쌓이지 않게 하고,
+                # 브로커가 보관하던 메시지만 받는다.
+                c.unsubscribe(cfg['TOPICS'])
+            state['connected'], state['last'] = True, now()
         log('mqtt_connect', reason=str(reason), client_id=cfg['MQTT_CLIENT_ID'])
 
     def subscribed(c, userdata, mid, reasons, properties):
@@ -327,6 +348,7 @@ def main():
 
     def disconnected(c, userdata, flags, reason, properties):
         metrics.mqtt_up.set(0)
+        state['connected'] = False
         log('mqtt_disconnect', reason=str(reason))
 
     def message(c, userdata, msg):
@@ -341,29 +363,35 @@ def main():
     client.connect_async(cfg['MQTT_HOST'], cfg['MQTT_PORT'], keepalive=60)
     client.loop_start()
     pending = None
-    deadline = last_message = 0.0
+    drain_failed = False
     try:
         while not overloaded.is_set():
             if stop.is_set() and not state['draining']:
                 if not cfg['DRAIN_ON_STOP']:
                     break  # 기본 파드: 구독을 유지한 채 끝낸다. 확인 안 한 메시지는 재시작 후 다시 받는다.
                 # 늘어났던 파드: 새 메시지를 그만 받고, 이미 받은 메시지를 모두 처리한 뒤 끝낸다.
-                state['draining'] = True
+                state['draining'], state['last'] = True, now()
                 client.unsubscribe(cfg['TOPICS'])
-                deadline, last_message = now() + cfg['DRAIN_SEC'], now()
+                deadline = now() + cfg['DRAIN_SEC']
                 log('drain_start', client_id=cfg['MQTT_CLIENT_ID'])
-            if state['draining'] and pending is None and inbox.empty():
-                # 구독 해제 직전에 브로커가 보낸 메시지가 더 올 수 있어 3초간 조용하면 끝낸다.
-                if now() - last_message >= 3 or now() >= deadline:
-                    log('drain_done', client_id=cfg['MQTT_CLIENT_ID'])
+            if state['draining']:
+                # 회수 모드는 접속해서 보관 메시지를 받기 시작한 뒤부터 조용한 시간을 잰다.
+                ready = state['connected'] or not cfg['DRAIN_ONLY']
+                if pending is None and inbox.empty() and ready and now() - state['last'] >= 3:
+                    # 3초간 새 메시지가 없으면 다 비운 것으로 본다.
+                    # connected=False면 구독 해제가 브로커에 닿지 않았을 수 있다(세션에 구독이 남음).
+                    log('drain_done', client_id=cfg['MQTT_CLIENT_ID'], connected=state['connected'])
                     break
-            if state['draining'] and now() >= deadline + 10:
-                log('drain_timeout', client_id=cfg['MQTT_CLIENT_ID'])
-                break
+                if now() >= deadline or (cfg['DRAIN_ONLY'] and stop.is_set()):
+                    # 마감까지 다 비우지 못했다(메시지가 계속 오거나 DB 장애). 정상 종료로 보고하지 않는다.
+                    drain_failed = True
+                    log('drain_timeout', client_id=cfg['MQTT_CLIENT_ID'],
+                        pending=pending is not None, queued=inbox.qsize())
+                    break
             if pending is None:
                 try:
                     pending = inbox.get(timeout=0.2)
-                    last_message = now()
+                    state['last'] = now()
                 except queue.Empty:
                     continue
             try:
@@ -385,9 +413,11 @@ def main():
                 log('storage_retry', error=type(exc).__name__)
                 if state['draining']:
                     time.sleep(2)  # 종료 처리 중에도 같은 메시지를 다시 시도한다.
-                elif stop.wait(2):
-                    break
-        return 1 if overloaded.is_set() else 0
+                else:
+                    # 종료 신호가 오면 대기를 끝내고 다음 반복으로 넘어간다.
+                    # 다음 반복에서 파드 종류(기본/늘어난 파드)에 맞는 종료 처리를 한다.
+                    stop.wait(2)
+        return 1 if overloaded.is_set() or drain_failed else 0
     finally:
         client.disconnect()
         client.loop_stop()

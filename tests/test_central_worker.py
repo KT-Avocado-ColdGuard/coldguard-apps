@@ -1,6 +1,12 @@
 """중앙 수집 워커 검사/저장 로직 시험. MQTT·MySQL에 실제로 연결하지 않는다."""
+import itertools
 import json
+import signal
+import threading
+import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -220,6 +226,155 @@ class StoreTest(unittest.TestCase):
         self.assertIsNone(store.db)
         self.assertTrue(conn.closed)
 
+
+class ShutdownTest(unittest.TestCase):
+    def test_db_error_then_sigterm_enters_drain(self):
+        # 늘어난 파드(2번)가 DB 오류로 재시도하는 중에 종료 신호를 받아도 구독 해제·남은 처리를 거쳐야 한다.
+        cfg = cw.settings({'MQTT_PASS': 'test', 'MYSQL_PASSWORD': 'test',
+                           'MQTT_CLIENT_ID': 'central-worker-2'})
+        handlers = {}
+        client = Mock()
+        message = SimpleNamespace(topic=TEL_TOPIC, payload=b'{}', qos=1, retain=False, mid=10)
+        # 실제 MQTT 연결 없이 메시지 하나를 받은 상황을 만든다.
+        client.loop_start.side_effect = lambda: client.on_message(client, None, message)
+        attempts = 0
+
+        def save_attempt(*args):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                # 첫 저장 실패와 동시에 종료 신호를 받는다.
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+                raise ConnectionError('temporary DB failure')
+            return 'telemetry', (), 'stored'  # 종료 처리 진입 후 재시도는 성공
+
+        clock = itertools.count(1000)
+        with (
+            patch.object(cw, 'settings', return_value=cfg),
+            patch.object(cw, 'mqtt_client', return_value=client),
+            patch.object(cw, 'Store'),
+            patch.object(cw, 'Metrics'),
+            patch.object(cw.signal, 'signal',
+                         side_effect=lambda sig, handler: handlers.__setitem__(sig, handler)),
+            patch.object(cw, 'handle', side_effect=save_attempt),
+            patch.object(cw, 'now', side_effect=lambda: next(clock)),
+        ):
+            result = cw.main()
+
+        client.unsubscribe.assert_called_once_with(cfg['TOPICS'])
+        client.ack.assert_called_once_with(10, 1)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(result, 0)
+
+
+class RecoverTest(unittest.TestCase):
+    """회수 모드(DRAIN_ONLY)와 비우기 마감 처리."""
+
+    def run_main(self, env, client, handle_effect, sleep=None):
+        cfg = cw.settings({'MQTT_PASS': 'test', 'MYSQL_PASSWORD': 'test', **env})
+        clock = itertools.count(1000)
+        with (
+            patch.object(cw, 'settings', return_value=cfg),
+            patch.object(cw, 'mqtt_client', return_value=client),
+            patch.object(cw, 'Store'),
+            patch.object(cw, 'Metrics'),
+            patch.object(cw.signal, 'signal'),
+            patch.object(cw, 'handle', side_effect=handle_effect),
+            patch.object(cw, 'now', side_effect=lambda: next(clock)),
+            patch.object(cw.time, 'sleep', side_effect=sleep or (lambda s: None)),
+        ):
+            return cfg, cw.main()
+
+    @staticmethod
+    def message(mid):
+        return SimpleNamespace(topic=TEL_TOPIC, payload=b'{}', qos=1, retain=False, mid=mid)
+
+    def test_settings_require_explicit_client_id(self):
+        base = {'MQTT_PASS': 'x', 'MYSQL_PASSWORD': 'y', 'DRAIN_ONLY': 'true'}
+        with self.assertRaises(ValueError):
+            cw.settings(base)
+        with self.assertRaises(ValueError):
+            cw.settings({**base, 'MQTT_CLIENT_ID': 'central-worker-3', 'DRAIN_ONLY': 'yes'})
+        cfg = cw.settings({**base, 'MQTT_CLIENT_ID': 'central-worker-3'})
+        self.assertTrue(cfg['DRAIN_ONLY'])
+
+    def test_recover_drains_session_without_subscribing(self):
+        client = Mock()
+        ok = SimpleNamespace(is_failure=False)
+
+        def start():
+            # 접속하면 브로커가 세션에 보관하던 메시지 2개를 보낸다.
+            client.on_connect(client, None, None, ok, None)
+            client.on_message(client, None, self.message(1))
+            client.on_message(client, None, self.message(2))
+        client.loop_start.side_effect = start
+        cfg, result = self.run_main({'MQTT_CLIENT_ID': 'central-worker-3', 'DRAIN_ONLY': 'true'},
+                                    client, lambda *a: ('telemetry', (), 'stored'))
+        client.subscribe.assert_not_called()
+        client.unsubscribe.assert_called_once_with(cfg['TOPICS'])
+        self.assertEqual([c.args for c in client.ack.call_args_list], [(1, 1), (2, 1)])
+        self.assertEqual(result, 0)
+
+    def test_recover_reports_failure_when_db_stays_down(self):
+        client = Mock()
+        ok = SimpleNamespace(is_failure=False)
+
+        def start():
+            client.on_connect(client, None, None, ok, None)
+            client.on_message(client, None, self.message(1))
+        client.loop_start.side_effect = start
+
+        def db_down(*a):
+            raise ConnectionError('db down')
+        _, result = self.run_main({'MQTT_CLIENT_ID': 'central-worker-3', 'DRAIN_ONLY': 'true',
+                                   'DRAIN_SEC': '20'}, client, db_down)
+        client.ack.assert_not_called()  # 저장 못 한 메시지는 확인하지 않아 세션에 남는다
+        self.assertEqual(result, 1)
+
+    def test_drain_deadline_with_messages_still_flowing_is_failure(self):
+        # 마감에 닿았는데 메시지가 계속 오면, 잠깐 비는 순간이 있어도 성공(0)으로 보고하지 않는다.
+        # 실제 시간으로 0.05초마다 메시지가 오게 하고 마감은 1초로 둔다.
+        client = Mock()
+        signal_calls = []
+        flowing = threading.Event()
+        ok = SimpleNamespace(is_failure=False)
+
+        def feed():
+            mid = 1
+            while not flowing.is_set():
+                client.on_message(client, None, self.message(mid))
+                mid += 1
+                time.sleep(0.05)
+
+        def start():
+            client.on_connect(client, None, None, ok, None)
+            threading.Thread(target=feed, daemon=True).start()
+        client.loop_start.side_effect = start
+
+        sent = []
+
+        def store_and_stop(*a):
+            if not sent:  # 첫 저장 때 종료 신호를 보낸다
+                sent.append(True)
+                [h for sig, h in signal_calls if sig == signal.SIGTERM][0](signal.SIGTERM, None)
+            return 'telemetry', (), 'stored'
+
+        cfg = cw.settings({'MQTT_PASS': 't', 'MYSQL_PASSWORD': 't',
+                           'MQTT_CLIENT_ID': 'central-worker-2', 'DRAIN_SEC': '1'})
+        try:
+            with (
+                patch.object(cw, 'settings', return_value=cfg),
+                patch.object(cw, 'mqtt_client', return_value=client),
+                patch.object(cw, 'Store'),
+                patch.object(cw, 'Metrics'),
+                patch.object(cw.signal, 'signal', side_effect=lambda *a: signal_calls.append(a)),
+                patch.object(cw, 'handle', side_effect=store_and_stop),
+            ):
+                result = cw.main()
+        finally:
+            flowing.set()
+        client.unsubscribe.assert_called_once_with(cfg['TOPICS'])
+        self.assertEqual(result, 1)
 
 if __name__ == '__main__':
     unittest.main()
