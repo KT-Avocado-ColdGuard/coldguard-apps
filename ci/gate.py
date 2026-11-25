@@ -3,7 +3,7 @@ import datetime as dt
 import json
 import sys
 
-SERVICES = {'collector', 'controller', 'field-web'}
+SERVICES = {'collector', 'controller', 'field-web', 'central-worker'}
 
 def evaluate(report, exceptions, image_id, today=None):
     today = today or dt.datetime.now(dt.timezone.utc).date()
@@ -21,7 +21,7 @@ def evaluate(report, exceptions, image_id, today=None):
             raise ValueError('Incomplete approval record')
         expiry = dt.date.fromisoformat(e['expires_at'])
         if set(e['services']) != SERVICES:
-            raise ValueError('Shared image requires review of all three services')
+            raise ValueError('Shared image requires review of all services')
         if e['image_id'] == image_id and today < expiry:
             valid.append(e)
     blocked, waived = [], []

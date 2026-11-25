@@ -11,7 +11,7 @@ class GateTests(unittest.TestCase):
         self.exception = dict(id='TEST-1', package='pkg', installed_version='1', target='os',
             image_id='sha256:test', approved_by='test reviewer', approval_issue='test-only',
             reason='fixture', mitigation='fixture', expires_at='2030-02-01',
-            services=['collector', 'controller', 'field-web'])
+            services=['collector', 'controller', 'field-web', 'central-worker'])
     def check(self, exceptions):
         return evaluate(self.report, exceptions, 'sha256:test', dt.date(2030, 1, 1))
     def test_high_and_critical_block(self):
@@ -33,7 +33,16 @@ class GateTests(unittest.TestCase):
     def test_invalid_scan_fails(self):
         for report in ({}, {'SchemaVersion': 2, 'Results': []}):
             with self.assertRaises(ValueError): evaluate(report, [], 'image')
+    def test_exception_without_central_worker_is_rejected(self):
+        # 공통 이미지의 네 서비스 중 중앙 워커 승인이 빠지면 거부한다.
+        exception = {
+            **self.exception,
+            'services': ['collector', 'controller', 'field-web'],
+        }
 
+        with self.assertRaises(ValueError):
+            self.check([exception])
+            
 @unittest.skipUnless(
     sys.platform.startswith("linux"),
     "Linux Bash process test; run in WSL or GitHub Actions",

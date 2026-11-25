@@ -8,7 +8,7 @@ trap 'docker logout "$registry" >/dev/null 2>&1 || true' EXIT
 aws --version > reports/aws-version.txt 2>&1
 aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$registry"
 printf 'service,image,digest,result\n' > reports/published-images.csv
-for service in collector controller field-web; do
+for service in collector controller field-web central-worker; do
   repo="coldguard-prod-$service"
   image="$registry/$repo:$GITHUB_SHA"
   aws ecr batch-get-image --repository-name "$repo" --image-ids "imageTag=$GITHUB_SHA" > "reports/existing-$service.json"
