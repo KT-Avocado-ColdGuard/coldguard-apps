@@ -26,7 +26,7 @@ from decimal import Decimal
 
 from common.coldguard_protocol import (EVENTS, REASONS, loads, number, parse_time,
                                        split_topic, telemetry)
-from common.coldguard_runtime import Database, sql_time
+from common.coldguard_runtime import Database, sql_time, write_line
 
 CHANNELS = ('telemetry', 'event', 'ack')
 SHARE_GROUP = 'central-worker'
@@ -42,8 +42,9 @@ def now():
 def log(event, **fields):
     # 수집기와 같은 한 줄 JSON. 비밀번호와 메시지 원문은 남기지 않는다.
     stamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    print(json.dumps({'event': event, 'logged_at': stamp, **fields},
-                     ensure_ascii=False, allow_nan=False, default=str), flush=True)
+    # 여러 스레드가 동시에 찍어도 줄이 섞이지 않게 공통 함수로 한 번에 쓴다(출력 형식은 그대로).
+    write_line(json.dumps({'event': event, 'logged_at': stamp, **fields},
+                          ensure_ascii=False, allow_nan=False, default=str))
 
 
 def settings(env=None):

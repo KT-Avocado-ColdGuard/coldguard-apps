@@ -9,6 +9,8 @@
 import json
 import math
 import os
+import sys
+import threading
 from common.coldguard_config import values as config_values
 import sqlite3
 from datetime import datetime, timezone
@@ -16,8 +18,25 @@ from pathlib import Path
 from common.coldguard_protocol import identity, topic, utc, parse_time
 
 
+_line_lock = threading.Lock()
+
+
+def write_line(text):
+    """로그 한 줄을 통째로 한 번에 쓴다.
+
+    print는 내용과 줄바꿈을 따로 써서, 여러 스레드(MQTT 콜백·요청 처리)가 동시에 찍으면 두 줄이 한 줄로 섞인다.
+    잠금 안에서 줄바꿈까지 붙인 문자열을 한 번 쓰고 바로 내보낸다. 출력 내용은 print와 같다.
+    """
+    out = sys.stdout
+    if out is None:  # 표준 출력이 없는 실행 환경에서는 print처럼 아무것도 하지 않는다.
+        return
+    with _line_lock:
+        out.write(text + '\n')
+        out.flush()
+
+
 def log(event, **fields):
-    print(json.dumps(dict(event=event, at=utc(), **fields), ensure_ascii=False, allow_nan=False), flush=True)
+    write_line(json.dumps(dict(event=event, at=utc(), **fields), ensure_ascii=False, allow_nan=False))
 
 
 def settings(role, env=None):
