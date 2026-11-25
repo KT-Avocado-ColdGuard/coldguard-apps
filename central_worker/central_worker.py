@@ -322,20 +322,36 @@ def main():
 
     # draining: 새 메시지를 받지 않고 남은 메시지만 처리하는 중
     # last: 마지막으로 메시지를 꺼낸(또는 접속한) 시각. 3초간 조용하면 다 비운 것으로 본다.
-    state = {'draining': cfg['DRAIN_ONLY'], 'connected': False, 'last': now()}
+    state = {'draining': cfg['DRAIN_ONLY'], 'connected': False, 'last': now(),
+             'unsub_requested': False, 'unsubscribed': False, 'unsub_failed': False}
     deadline = now() + cfg['DRAIN_SEC'] if cfg['DRAIN_ONLY'] else 0.0
     if cfg['DRAIN_ONLY']:
         log('recover_start', client_id=cfg['MQTT_CLIENT_ID'])
+
+    def request_unsubscribe(c):
+        # Mark before sending: the network callback may run immediately.
+        state['unsub_requested'] = True
+        state['unsubscribed'] = False
+        result, _ = c.unsubscribe(cfg['TOPICS'])
+        if result != 0:  # MQTT_ERR_SUCCESS == 0
+            state['unsub_failed'] = True
+
+    def unsubscribed(c, userdata, mid, reasons, properties):
+        # MQTT 3.1.1 has no per-topic reason codes; receiving UNSUBACK is confirmation.
+        if state['draining'] and state['unsub_requested']:
+            if any(reason.is_failure for reason in (reasons or [])):
+                state['unsub_failed'] = True
+            else:
+                state['unsubscribed'], state['last'] = True, now()
 
     def connected(c, userdata, flags, reason, properties):
         metrics.mqtt_up.set(0 if reason.is_failure else 1)
         if not reason.is_failure:
             if not state['draining']:
                 c.subscribe([(t, 1) for t in cfg['TOPICS']])
-            elif cfg['DRAIN_ONLY']:
-                # 회수 모드: 세션에 남은 구독도 해제해 새 메시지가 더 쌓이지 않게 하고,
-                # 브로커가 보관하던 메시지만 받는다.
-                c.unsubscribe(cfg['TOPICS'])
+            else:
+                # Both recovery and normal drain require broker-confirmed unsubscribe.
+                request_unsubscribe(c)
             state['connected'], state['last'] = True, now()
         log('mqtt_connect', reason=str(reason), client_id=cfg['MQTT_CLIENT_ID'])
 
@@ -349,6 +365,8 @@ def main():
     def disconnected(c, userdata, flags, reason, properties):
         metrics.mqtt_up.set(0)
         state['connected'] = False
+        if state['draining']:
+            state['unsub_failed'] = True
         log('mqtt_disconnect', reason=str(reason))
 
     def message(c, userdata, msg):
@@ -359,6 +377,7 @@ def main():
 
     client.on_connect, client.on_subscribe = connected, subscribed
     client.on_disconnect, client.on_message = disconnected, message
+    client.on_unsubscribe = unsubscribed
     client.on_connect_fail = lambda c, u: log('mqtt_connect_failed')
     client.connect_async(cfg['MQTT_HOST'], cfg['MQTT_PORT'], keepalive=60)
     client.loop_start()
@@ -371,16 +390,18 @@ def main():
                     break  # 기본 파드: 구독을 유지한 채 끝낸다. 확인 안 한 메시지는 재시작 후 다시 받는다.
                 # 늘어났던 파드: 새 메시지를 그만 받고, 이미 받은 메시지를 모두 처리한 뒤 끝낸다.
                 state['draining'], state['last'] = True, now()
-                client.unsubscribe(cfg['TOPICS'])
+                request_unsubscribe(client)
                 deadline = now() + cfg['DRAIN_SEC']
                 log('drain_start', client_id=cfg['MQTT_CLIENT_ID'])
             if state['draining']:
-                # 회수 모드는 접속해서 보관 메시지를 받기 시작한 뒤부터 조용한 시간을 잰다.
-                ready = state['connected'] or not cfg['DRAIN_ONLY']
+                if state['unsub_failed']:
+                    drain_failed = True
+                    log('drain_unsubscribe_failed', client_id=cfg['MQTT_CLIENT_ID'],
+                        recovery_required=True)
+                    break
+                ready = state['connected'] and state['unsubscribed']
                 if pending is None and inbox.empty() and ready and now() - state['last'] >= 3:
-                    # 3초간 새 메시지가 없으면 다 비운 것으로 본다.
-                    # connected=False면 구독 해제가 브로커에 닿지 않았을 수 있다(세션에 구독이 남음).
-                    log('drain_done', client_id=cfg['MQTT_CLIENT_ID'], connected=state['connected'])
+                    log('drain_done', client_id=cfg['MQTT_CLIENT_ID'], connected=True)
                     break
                 if now() >= deadline or (cfg['DRAIN_ONLY'] and stop.is_set()):
                     # 마감까지 다 비우지 못했다(메시지가 계속 오거나 DB 장애). 정상 종료로 보고하지 않는다.

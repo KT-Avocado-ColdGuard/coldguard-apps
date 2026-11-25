@@ -18,23 +18,6 @@ ACK_TOPIC = 'coldguard/site01/fz01/ack'
 NOW = datetime(2026, 11, 24, 9, 0, tzinfo=timezone.utc).timestamp()
 
 
-def broker_client(unsub_rc=0, unsub_reasons=(), send_unsuback=True):
-    """구독 해제 요청에 브로커처럼 응답하는 가짜 MQTT 클라이언트.
-
-    unsub_rc: unsubscribe() 반환 코드(0=요청 전송 성공).
-    unsub_reasons: UNSUBACK에 담긴 주제별 결과(MQTT 3.1.1은 빈 목록).
-    send_unsuback: False면 브로커가 UNSUBACK을 보내지 않는 상황.
-    """
-    client = Mock()
-
-    def unsubscribe(topics):
-        if unsub_rc == 0 and send_unsuback:
-            client.on_unsubscribe(client, None, 1, list(unsub_reasons), None)
-        return unsub_rc, 1
-    client.unsubscribe.side_effect = unsubscribe
-    return client
-
-
 def tel(**over):
     body = {'site_id': 'site01', 'device_id': 'fz01', 'seq': 356095,
             'measured_at': '2026-11-24T08:22:30.000000Z', 'temp_c': -29.9, 'setpoint_c': -30.0,
@@ -244,19 +227,26 @@ class StoreTest(unittest.TestCase):
         self.assertTrue(conn.closed)
 
 
+def confirm_unsubscribe(client):
+    # Simulate broker UNSUBACK; production callback comes from the MQTT network loop.
+    def unsubscribe(topics):
+        client.on_unsubscribe(client, None, 123, [], None)
+        return 0, 123
+    client.unsubscribe.side_effect = unsubscribe
+
+
 class ShutdownTest(unittest.TestCase):
     def test_db_error_then_sigterm_enters_drain(self):
         # 늘어난 파드(2번)가 DB 오류로 재시도하는 중에 종료 신호를 받아도 구독 해제·남은 처리를 거쳐야 한다.
         cfg = cw.settings({'MQTT_PASS': 'test', 'MYSQL_PASSWORD': 'test',
                            'MQTT_CLIENT_ID': 'central-worker-2'})
         handlers = {}
-        client = broker_client()
+        client = Mock()
+        confirm_unsubscribe(client)
         message = SimpleNamespace(topic=TEL_TOPIC, payload=b'{}', qos=1, retain=False, mid=10)
-        ok = SimpleNamespace(is_failure=False)
-
-        # 실제 MQTT 연결 없이 접속 후 메시지 하나를 받은 상황을 만든다.
+        # 실제 MQTT 연결 없이 메시지 하나를 받은 상황을 만든다.
         def start():
-            client.on_connect(client, None, None, ok, None)
+            client.on_connect(client, None, None, SimpleNamespace(is_failure=False), None)
             client.on_message(client, None, message)
         client.loop_start.side_effect = start
         attempts = 0
@@ -295,9 +285,7 @@ class RecoverTest(unittest.TestCase):
     def run_main(self, env, client, handle_effect, sleep=None):
         cfg = cw.settings({'MQTT_PASS': 'test', 'MYSQL_PASSWORD': 'test', **env})
         clock = itertools.count(1000)
-        self.events = []
         with (
-            patch.object(cw, 'log', side_effect=lambda event, **kw: self.events.append(event)),
             patch.object(cw, 'settings', return_value=cfg),
             patch.object(cw, 'mqtt_client', return_value=client),
             patch.object(cw, 'Store'),
@@ -323,7 +311,8 @@ class RecoverTest(unittest.TestCase):
         self.assertTrue(cfg['DRAIN_ONLY'])
 
     def test_recover_drains_session_without_subscribing(self):
-        client = broker_client()
+        client = Mock()
+        confirm_unsubscribe(client)
         ok = SimpleNamespace(is_failure=False)
 
         def start():
@@ -340,7 +329,8 @@ class RecoverTest(unittest.TestCase):
         self.assertEqual(result, 0)
 
     def test_recover_reports_failure_when_db_stays_down(self):
-        client = broker_client()
+        client = Mock()
+        confirm_unsubscribe(client)
         ok = SimpleNamespace(is_failure=False)
 
         def start():
@@ -358,7 +348,8 @@ class RecoverTest(unittest.TestCase):
     def test_drain_deadline_with_messages_still_flowing_is_failure(self):
         # 마감에 닿았는데 메시지가 계속 오면, 잠깐 비는 순간이 있어도 성공(0)으로 보고하지 않는다.
         # 실제 시간으로 0.05초마다 메시지가 오게 하고 마감은 1초로 둔다.
-        client = broker_client()
+        client = Mock()
+        confirm_unsubscribe(client)
         signal_calls = []
         flowing = threading.Event()
         ok = SimpleNamespace(is_failure=False)
@@ -400,61 +391,66 @@ class RecoverTest(unittest.TestCase):
         client.unsubscribe.assert_called_once_with(cfg['TOPICS'])
         self.assertEqual(result, 1)
 
-    # --- 구독 해제를 브로커가 확인(UNSUBACK)해야만 "다 비움"으로 인정한다 ---
 
-    def recover_with(self, client, extra_env=None):
-        ok = SimpleNamespace(is_failure=False)
+class UnsubscribeTest(unittest.TestCase):
+    def run_case(self, recovery, outcome):
+        cfg = cw.settings({
+            'MQTT_PASS': 'test', 'MYSQL_PASSWORD': 'test',
+            'MQTT_CLIENT_ID': 'central-worker-2',
+            'DRAIN_ONLY': 'true' if recovery else 'false',
+            'DRAIN_SEC': '10',
+        })
+        client = Mock()
+        handlers = {}
+        clock = itertools.count(1000)
 
-        def start():
-            client.on_connect(client, None, None, ok, None)
-            client.on_message(client, None, self.message(1))
-        client.loop_start.side_effect = start
-        env = {'MQTT_CLIENT_ID': 'central-worker-3', 'DRAIN_ONLY': 'true', **(extra_env or {})}
-        return self.run_main(env, client, lambda *a: ('telemetry', (), 'stored'))
-
-    def test_unsubscribe_send_error_is_failure(self):
-        # unsubscribe 요청 자체가 실패하면(연결 끊김 등) 바로 실패로 끝내고 회수가 필요하다고 남긴다.
-        _, result = self.recover_with(broker_client(unsub_rc=4))
-        self.assertEqual(result, 1)
-        self.assertIn('drain_unsubscribe_failed', self.events)
-        self.assertNotIn('drain_done', self.events)
-
-    def test_unsuback_failure_reason_is_failure(self):
-        # MQTT 5에서 브로커가 해제를 거부한 결과 코드를 보내면 실패로 처리한다.
-        refused = SimpleNamespace(is_failure=True, value=0x87)
-        _, result = self.recover_with(broker_client(unsub_reasons=[refused]))
-        self.assertEqual(result, 1)
-        self.assertIn('drain_unsubscribe_failed', self.events)
-
-    def test_missing_unsuback_never_reports_done(self):
-        # 브로커가 UNSUBACK을 안 보내면 메시지를 다 처리했어도 성공으로 보지 않고 마감에 실패한다.
-        client = broker_client(send_unsuback=False)
-        _, result = self.recover_with(client, {'DRAIN_SEC': '12'})
-        self.assertEqual(result, 1)
-        self.assertIn('drain_timeout', self.events)
-        self.assertNotIn('drain_done', self.events)
-        client.ack.assert_called_once_with(1, 1)  # 받은 메시지 처리는 계속한다
-
-    def test_disconnect_during_drain_is_failure(self):
-        # 비우는 중에 연결이 끊기면 세션에 구독이 남았을 수 있으므로 실패로 끝낸다.
-        client = broker_client(send_unsuback=False)
-        ok = SimpleNamespace(is_failure=False)
+        def unsubscribe(topics):
+            if outcome == 'request_failure':
+                return 4, None
+            if outcome == 'confirmed':
+                client.on_unsubscribe(client, None, 123, [], None)
+            elif outcome == 'broker_failure':
+                client.on_unsubscribe(client, None, 123,
+                                      [SimpleNamespace(is_failure=True)], None)
+            elif outcome == 'disconnect_during':
+                client.on_disconnect(client, None, None, 'lost', None)
+            # no_response: request succeeded but no UNSUBACK ever arrives.
+            return 0, 123
 
         def start():
-            client.on_connect(client, None, None, ok, None)
-            client.on_disconnect(client, None, None, SimpleNamespace(is_failure=True), None)
-        client.loop_start.side_effect = start
-        _, result = self.run_main({'MQTT_CLIENT_ID': 'central-worker-3', 'DRAIN_ONLY': 'true'},
-                                  client, lambda *a: ('telemetry', (), 'stored'))
-        self.assertEqual(result, 1)
-        self.assertIn('drain_unsubscribe_failed', self.events)
-        self.assertNotIn('drain_done', self.events)
+            client.on_connect(client, None, None, SimpleNamespace(is_failure=False), None)
+            if not recovery:
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
 
-    def test_mqtt311_empty_unsuback_is_success(self):
-        # MQTT 3.1.1 UNSUBACK에는 결과 코드가 없다(빈 목록). 받은 것만으로 확인된 것으로 본다.
-        _, result = self.recover_with(broker_client(unsub_reasons=()))
-        self.assertEqual(result, 0)
-        self.assertIn('drain_done', self.events)
+        client.unsubscribe.side_effect = unsubscribe
+        client.loop_start.side_effect = start
+        with (
+            patch.object(cw, 'settings', return_value=cfg),
+            patch.object(cw, 'mqtt_client', return_value=client),
+            patch.object(cw, 'Store'),
+            patch.object(cw, 'Metrics'),
+            patch.object(cw.signal, 'signal',
+                         side_effect=lambda sig, handler: handlers.__setitem__(sig, handler)),
+            patch.object(cw, 'now', side_effect=lambda: next(clock)),
+            patch.object(cw, 'log') as logs,
+        ):
+            result = cw.main()
+        client.unsubscribe.assert_called_once_with(cfg['TOPICS'])
+        events = [call.args[0] for call in logs.call_args_list]
+        return result, events
+
+    def test_normal_and_recovery_need_confirmed_unsubscribe(self):
+        for recovery in (False, True):
+            for outcome in ('confirmed', 'request_failure', 'no_response',
+                            'broker_failure', 'disconnect_during'):
+                with self.subTest(recovery=recovery, outcome=outcome):
+                    result, events = self.run_case(recovery, outcome)
+                    if outcome == 'confirmed':
+                        self.assertEqual(result, 0)
+                        self.assertIn('drain_done', events)
+                    else:
+                        self.assertEqual(result, 1)
+                        self.assertNotIn('drain_done', events)
 
 
 if __name__ == '__main__':
