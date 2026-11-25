@@ -10,6 +10,7 @@ COPY collector ./collector
 COPY controller ./controller
 COPY field_web ./field_web
 COPY central_worker ./central_worker
+COPY control_api ./control_api
 COPY image ./image
 RUN mkdir -p /app/state && chown app:app /app/state
 USER app

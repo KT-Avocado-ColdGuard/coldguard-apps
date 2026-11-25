@@ -11,7 +11,7 @@ class GateTests(unittest.TestCase):
         self.exception = dict(id='TEST-1', package='pkg', installed_version='1', target='os',
             image_id='sha256:test', approved_by='test reviewer', approval_issue='test-only',
             reason='fixture', mitigation='fixture', expires_at='2030-02-01',
-            services=['collector', 'controller', 'field-web', 'central-worker'])
+            services=['collector', 'controller', 'field-web', 'central-worker', 'control-api'])
     def check(self, exceptions):
         return evaluate(self.report, exceptions, 'sha256:test', dt.date(2030, 1, 1))
     def test_high_and_critical_block(self):
@@ -34,10 +34,20 @@ class GateTests(unittest.TestCase):
         for report in ({}, {'SchemaVersion': 2, 'Results': []}):
             with self.assertRaises(ValueError): evaluate(report, [], 'image')
     def test_exception_without_central_worker_is_rejected(self):
-        # 공통 이미지의 네 서비스 중 중앙 워커 승인이 빠지면 거부한다.
+        # 공통 이미지의 다섯 서비스 중 중앙 워커 승인이 빠지면 거부한다.
         exception = {
             **self.exception,
-            'services': ['collector', 'controller', 'field-web'],
+            'services': ['collector', 'controller', 'field-web', 'control-api'],
+        }
+
+        with self.assertRaises(ValueError):
+            self.check([exception])
+
+    def test_exception_without_control_api_is_rejected(self):
+        # 통제 API도 같은 이미지를 쓰므로 예외 승인에서 빠지면 거부한다.
+        exception = {
+            **self.exception,
+            'services': ['collector', 'controller', 'field-web', 'central-worker'],
         }
 
         with self.assertRaises(ValueError):
