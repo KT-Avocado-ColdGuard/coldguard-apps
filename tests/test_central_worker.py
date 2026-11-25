@@ -102,6 +102,23 @@ class SettingsTest(unittest.TestCase):
                                          '$share/central-worker/coldguard/+/+/ack'])
 
 
+    def test_pod_name_decides_drain(self):
+        # HPA 최소 2개: 0, 1번은 구독 유지, 2번부터는 종료 전에 구독 해제 후 비우기
+        for client_id, expected in (('central-worker-0', False), ('central-worker-1', False),
+                                    ('central-worker-2', True), ('central-worker-3', True),
+                                    ('central-worker', False)):
+            with self.subTest(client_id=client_id):
+                cfg = cw.settings({'MQTT_PASS': 'x', 'MYSQL_PASSWORD': 'y', 'MQTT_CLIENT_ID': client_id})
+                self.assertEqual(cfg['DRAIN_ON_STOP'], expected)
+
+    def test_stable_replicas_follows_setting(self):
+        cfg = cw.settings({'MQTT_PASS': 'x', 'MYSQL_PASSWORD': 'y',
+                           'MQTT_CLIENT_ID': 'central-worker-2', 'STABLE_REPLICAS': '3'})
+        self.assertFalse(cfg['DRAIN_ON_STOP'])
+        with self.assertRaises(ValueError):
+            cw.settings({'MQTT_PASS': 'x', 'MYSQL_PASSWORD': 'y', 'STABLE_REPLICAS': '0'})
+
+
 class DecodeTest(unittest.TestCase):
     def test_telemetry(self):
         row, stamp = cw.decode_telemetry(tel(), TEL_TOPIC)

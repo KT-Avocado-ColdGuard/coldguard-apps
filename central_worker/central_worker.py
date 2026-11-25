@@ -8,13 +8,17 @@
 - 같은 키로 내용이 다른 데이터가 오면 저장하지 않고 duplicate_conflict로 기록합니다.
   (예: 시뮬레이터 SIM_DB 초기화로 seq가 1부터 다시 시작된 경우)
 - 모니터링용 /metrics를 제공합니다.
+- 여러 개(HPA 2~4)로 실행합니다. 파드마다 클라이언트 ID가 다르고(StatefulSet 파드 이름),
+  기본 개수 밖의 파드(늘어났다 줄어드는 파드)는 종료 전에 구독을 해제하고 받은 메시지를 모두 처리합니다.
 - 실행: python -m central_worker.central_worker
 """
 import json
 import os
 import queue
+import re
 import signal
 import threading
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -57,6 +61,8 @@ def settings(env=None):
         METRICS_HOST=env.get('METRICS_HOST', '0.0.0.0'),
         METRICS_PORT=env.get('METRICS_PORT', '9203'),
         FUTURE_SKEW_SEC=env.get('FUTURE_SKEW_SEC', '300'),
+        STABLE_REPLICAS=env.get('STABLE_REPLICAS', '2'),
+        DRAIN_SEC=env.get('DRAIN_SEC', '40'),
     )
     missing = [k for k, v in cfg.items() if not str(v).strip()]
     if missing:
@@ -68,8 +74,27 @@ def settings(env=None):
     cfg['FUTURE_SKEW_SEC'] = float(cfg['FUTURE_SKEW_SEC'])
     if not cfg['FUTURE_SKEW_SEC'] > 0:
         raise ValueError('FUTURE_SKEW_SEC는 0보다 커야 합니다.')
+    cfg['STABLE_REPLICAS'] = int(cfg['STABLE_REPLICAS'])
+    cfg['DRAIN_SEC'] = float(cfg['DRAIN_SEC'])
+    if cfg['STABLE_REPLICAS'] < 1 or not cfg['DRAIN_SEC'] > 0:
+        raise ValueError('STABLE_REPLICAS는 1 이상, DRAIN_SEC는 0보다 커야 합니다.')
+    cfg['DRAIN_ON_STOP'] = drain_on_stop(cfg['MQTT_CLIENT_ID'], cfg['STABLE_REPLICAS'])
     cfg['TOPICS'] = [f'$share/{SHARE_GROUP}/coldguard/+/+/{c}' for c in CHANNELS]
     return cfg
+
+
+def drain_on_stop(client_id, stable_replicas):
+    """종료할 때 구독을 해제하고 비우고 끝낼 파드인지 정한다.
+
+    StatefulSet 파드 이름(central-worker-0, -1, ...)이 클라이언트 ID다.
+    - 번호 < STABLE_REPLICAS(HPA 최소 개수): 항상 다시 돌아오는 파드다. 구독을 유지한 채 끝내서,
+      재시작이나 야간 중지 동안 들어온 메시지를 브로커가 이 파드 몫으로 보관하게 한다.
+    - 번호 >= STABLE_REPLICAS: HPA가 줄이면 돌아오지 않을 수 있다. 구독을 해제하고 이미 받은
+      메시지를 모두 저장한 뒤 끝내서, 이 파드 몫으로 메시지가 묶이지 않게 한다.
+    번호가 없는 이름(로컬 실행)은 구독을 유지한다.
+    """
+    match = re.search(r'-(\d+)$', client_id)
+    return bool(match) and int(match.group(1)) >= stable_replicas
 
 
 # ---------- 메시지 검사: 테이블 한 줄(row)로 바꾼다 ----------
@@ -285,11 +310,13 @@ def main():
     store, metrics = Store(cfg), Metrics(cfg)
     client = mqtt_client(cfg)
 
+    state = {'draining': False}
+
     def connected(c, userdata, flags, reason, properties):
         metrics.mqtt_up.set(0 if reason.is_failure else 1)
-        if not reason.is_failure:
+        if not reason.is_failure and not state['draining']:
             c.subscribe([(t, 1) for t in cfg['TOPICS']])
-        log('mqtt_connect', reason=str(reason))
+        log('mqtt_connect', reason=str(reason), client_id=cfg['MQTT_CLIENT_ID'])
 
     def subscribed(c, userdata, mid, reasons, properties):
         ok = len(reasons) == len(cfg['TOPICS']) and all(
@@ -314,11 +341,29 @@ def main():
     client.connect_async(cfg['MQTT_HOST'], cfg['MQTT_PORT'], keepalive=60)
     client.loop_start()
     pending = None
+    deadline = last_message = 0.0
     try:
-        while not stop.is_set() and not overloaded.is_set():
+        while not overloaded.is_set():
+            if stop.is_set() and not state['draining']:
+                if not cfg['DRAIN_ON_STOP']:
+                    break  # 기본 파드: 구독을 유지한 채 끝낸다. 확인 안 한 메시지는 재시작 후 다시 받는다.
+                # 늘어났던 파드: 새 메시지를 그만 받고, 이미 받은 메시지를 모두 처리한 뒤 끝낸다.
+                state['draining'] = True
+                client.unsubscribe(cfg['TOPICS'])
+                deadline, last_message = now() + cfg['DRAIN_SEC'], now()
+                log('drain_start', client_id=cfg['MQTT_CLIENT_ID'])
+            if state['draining'] and pending is None and inbox.empty():
+                # 구독 해제 직전에 브로커가 보낸 메시지가 더 올 수 있어 3초간 조용하면 끝낸다.
+                if now() - last_message >= 3 or now() >= deadline:
+                    log('drain_done', client_id=cfg['MQTT_CLIENT_ID'])
+                    break
+            if state['draining'] and now() >= deadline + 10:
+                log('drain_timeout', client_id=cfg['MQTT_CLIENT_ID'])
+                break
             if pending is None:
                 try:
                     pending = inbox.get(timeout=0.2)
+                    last_message = now()
                 except queue.Empty:
                     continue
             try:
@@ -338,7 +383,10 @@ def main():
                 # DB 오류: 확인하지 않고 쥐고 있다가 같은 메시지를 다시 처리한다.
                 metrics.db_up.set(0)
                 log('storage_retry', error=type(exc).__name__)
-                stop.wait(2)
+                if state['draining']:
+                    time.sleep(2)  # 종료 처리 중에도 같은 메시지를 다시 시도한다.
+                elif stop.wait(2):
+                    break
         return 1 if overloaded.is_set() else 0
     finally:
         client.disconnect()

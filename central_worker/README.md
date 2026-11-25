@@ -26,6 +26,16 @@
 
 <br />
 
+## 여러 개로 실행 (HPA 2~4)
+
+StatefulSet으로 배포하고 HPA가 CPU 사용률에 따라 2~4개로 조절합니다. 공유 구독이라 메시지는 파드끼리 나눠 받습니다.
+
+- 파드 이름(`central-worker-0`, `-1`, ...)을 MQTT 클라이언트 ID로 씁니다. 파드마다 다르고, 재시작해도 같은 번호로 돌아옵니다.
+- **기본 파드**(번호 < `STABLE_REPLICAS`, 기본 0·1번): 종료할 때 구독을 유지합니다. 재시작이나 야간 중지 동안 들어온 메시지는 브로커가 보관했다가 다시 전달합니다.
+- **늘어난 파드**(2·3번): HPA가 줄일 때 돌아오지 않을 수 있어서, 종료 신호를 받으면 구독을 해제하고 이미 받은 메시지를 모두 저장한 뒤 끝냅니다(`drain_start` → `drain_done` 로그). 이 파드 몫으로 메시지가 묶이지 않습니다.
+
+<br />
+
 ## 설정
 
 환경변수로 지정합니다. 예시는 [`config/central_worker.env.example`](../config/central_worker.env.example)을 참고하세요.
@@ -34,11 +44,13 @@
 |---|---|---|
 | `MQTT_HOST` / `MQTT_PORT` | `mosquitto` / `1883` | 중앙 Mosquitto (클러스터 내부 평문 리스너) |
 | `MQTT_USER` / `MQTT_PASS` | `central-worker` / (필수) | MQTT 계정 |
-| `MQTT_CLIENT_ID` | `central-worker` | 영속 세션 식별자. 바꾸면 보관 중인 메시지를 받지 못합니다 |
+| `MQTT_CLIENT_ID` | `central-worker` | 영속 세션 식별자. 배포에서는 파드 이름을 넣습니다 |
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DB` | `mysql` / `3306` / `coldguard_central` | 중앙 MySQL |
 | `MYSQL_USER` / `MYSQL_PASSWORD` | `coldguard_worker` / (필수) | DB 계정 (SELECT 전체, 수집 테이블 3개 INSERT) |
 | `METRICS_PORT` | `9203` | `/metrics` 포트 |
 | `FUTURE_SKEW_SEC` | `300` | 현재보다 이 초 이상 미래인 시각은 거부 |
+| `STABLE_REPLICAS` | `2` | HPA 최소 개수와 같게 둡니다. 이 번호 미만 파드는 종료 때 구독을 유지합니다 |
+| `DRAIN_SEC` | `40` | 늘어난 파드가 종료 전에 메시지를 비우는 최대 시간(초) |
 
 <br />
 
@@ -50,7 +62,7 @@
 python -m central_worker.central_worker
 ```
 
-배포 매니페스트는 비공개 저장소 `coldguard-deploy`의 `central-worker/`에 있습니다.
+배포 매니페스트(StatefulSet·HPA·Service)는 비공개 저장소 `coldguard-deploy`의 `central-worker/`에 있습니다.
 
 <br />
 
