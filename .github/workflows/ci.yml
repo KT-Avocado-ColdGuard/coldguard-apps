@@ -184,6 +184,7 @@ jobs:
             CI_RESULT: ${{ needs.test-build-scan.result }}
             EVENT_NAME: ${{ github.event_name }}
             REF: ${{ github.ref }}
-            SOURCE_SHA: ${{ github.sha }}
+            # PR은 소스 브랜치의 마지막 커밋을, 그 외 실행은 해당 실행 커밋을 표시합니다.
+            SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
             RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           run: python3 ci/discord.py

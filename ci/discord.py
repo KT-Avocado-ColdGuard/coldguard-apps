@@ -10,7 +10,7 @@ def build_message(env):
     publishes = env["REF"] == "refs/heads/main" and env["EVENT_NAME"] != "pull_request"
     if result == "success":
         title = "✅ CI 검사 완료"
-        status = "테스트 / Trivy 통과 및 ECR 게시 완료" if publishes else "테스트 / 빌드 / Trivy 검사 통과 — PR에서는 ECR에 게시하지 않음"
+        status = "테스트 / 빌드 / Trivy 검사 및 ECR 게시 완료" if publishes else "테스트 / 빌드 / Trivy 검사 통과 — 이 실행에서는 ECR에 게시하지 않음"
     elif result == "cancelled":
         title, status = "⚪ CI 검사 취소", "실행이 취소되었습니다. Actions에서 취소 사유를 확인해 주세요."
     elif result == "skipped":
@@ -21,7 +21,7 @@ def build_message(env):
         f"## {title}\n"
         f"**{status}**\n\n"
         f"- 브랜치: `{env['REF']}`\n"
-        f"- 커밋 SHA: `{env['SOURCE_SHA']}`\n"
+        f"- 소스 커밋 SHA: `{env['SOURCE_SHA']}`\n"
         f"- 실행 결과: <{env['RUN_URL']}>\n\n"
         "※ 이 알림은 CI 결과이며 실제 서비스 배포 완료 알림이 아닙니다."
     )
