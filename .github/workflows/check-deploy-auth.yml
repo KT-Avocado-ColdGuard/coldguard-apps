@@ -1,0 +1,86 @@
+name: Check deploy App authentication
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-auth:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check required settings
+        env:
+          APP_ID: ${{ vars.DEPLOY_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$APP_ID" ]; then
+            echo "::error::DEPLOY_APP_ID is missing."
+            exit 1
+          fi
+
+          if [ -z "$APP_PRIVATE_KEY" ]; then
+            echo "::error::DEPLOY_APP_PRIVATE_KEY is missing."
+            exit 1
+          fi
+
+          echo "Required settings are present."
+
+      - name: Create scoped deployment token
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3
+        with:
+          app-id: ${{ vars.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+          owner: KT-Avocado-ColdGuard
+          repositories: coldguard-deploy
+          permission-contents: write
+
+      - name: Verify target repository and deployment files
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          repositories="$(
+            gh api installation/repositories \
+              --jq '.repositories[].full_name'
+          )"
+
+          if [ "$repositories" != "KT-Avocado-ColdGuard/coldguard-deploy" ]; then
+            echo "::error::Unexpected repository scope."
+            exit 1
+          fi
+
+          for path in \
+            central-worker/statefulset.yaml \
+            control-api/deployment.yaml
+          do
+            file_type="$(
+              gh api \
+                "repos/KT-Avocado-ColdGuard/coldguard-deploy/contents/$path?ref=main" \
+                --jq '.type'
+            )"
+
+            if [ "$file_type" != "file" ]; then
+              echo "::error::Expected deployment file was not found."
+              exit 1
+            fi
+
+            echo "Verified: $path"
+          done
+
+          {
+            echo "## Deployment authentication check"
+            echo "- Installation token created with Contents write permission."
+            echo "- Token scope: coldguard-deploy only."
+            echo "- Both deployment files are readable."
+            echo "- No repository files were changed."
+            echo "- No deployment was started."
+          } >> "$GITHUB_STEP_SUMMARY"
