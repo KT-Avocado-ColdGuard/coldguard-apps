@@ -23,6 +23,7 @@
 - **충돌 감지**: 같은 키인데 내용이 다르면 저장하지 않고 `duplicate_conflict` 로그를 남깁니다. 시뮬레이터 `SIM_DB` 초기화로 seq가 1부터 다시 시작된 경우 등이 해당합니다.
 - **잘못된 메시지**: 형식이 틀린 메시지는 `message_rejected` 로그를 남기고 버립니다. 같은 메시지를 계속 재시도하지 않습니다.
 - **DB 장애**: 저장에 실패하면 메시지를 확인하지 않고 2초마다 다시 시도합니다. DB가 돌아오면 이어서 처리합니다.
+- **DB 상태 확인**: 처리할 메시지가 없을 때 15초마다 DB에 `SELECT 1`을 보내 `coldguard_central_db_up`을 갱신합니다. 시설 연결이 끊겨 메시지가 없어도 DB 상태가 맞게 보이고, 상태가 바뀔 때만 `db_check` 로그를 남깁니다. 종료 처리 중에는 확인하지 않습니다.
 
 <br />
 
@@ -85,7 +86,7 @@ python -m central_worker.central_worker
 | 이름 | 설명 |
 |---|---|
 | `coldguard_central_messages_total{channel,result}` | 처리 건수 (`stored` / `duplicate` / `rejected`) |
-| `coldguard_central_db_up` | 마지막 DB 처리 성공 여부 |
+| `coldguard_central_db_up` | DB 연결 상태(1 정상, 0 끊김). 저장할 때마다 바뀌고, 처리할 메시지가 없을 때는 15초마다 직접 확인 |
 | `coldguard_central_mqtt_up` | MQTT 연결 여부 |
 
 <br />
