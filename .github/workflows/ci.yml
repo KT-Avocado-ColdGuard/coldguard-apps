@@ -183,7 +183,8 @@ jobs:
             DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
             CI_RESULT: ${{ needs.test-build-scan.result }}
             EVENT_NAME: ${{ github.event_name }}
-            REF: ${{ github.ref }}
+            # PR은 작업 브랜치 이름을, 그 외 실행은 실행 참조값을 표시합니다.
+            REF: ${{ github.head_ref || github.ref }}
             # PR은 소스 브랜치의 마지막 커밋을, 그 외 실행은 해당 실행 커밋을 표시합니다.
             SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
             RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
