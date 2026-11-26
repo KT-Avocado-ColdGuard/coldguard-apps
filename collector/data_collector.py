@@ -255,19 +255,21 @@ def main():
                         if event:
                             log("state_changed", **event)
                     metrics.db_up.set(1)
+                    # 미전송 건수는 event_log COUNT 쿼리(매번 새 DB 연결)라 1초에 한 번만 센다.
+                    # 메시지마다 세면 처리가 밀려 측정값이 stale로 판정된다(11/26 시설 배포에서 확인).
+                    try:
+                        metrics.unsent.labels(cfg["SITE"]).set(
+                            store.sender.pending_count()
+                        )
+                    except Exception as exc:
+                        metrics.unsent.labels(cfg['SITE']).set(float('nan'))
+                        log('unsent_count_error',error=type(exc).__name__)
                     next_check = now() + 1
                 if client.is_connected():
                     try:
                         store.sender.flush(lambda t,b:publish(client,t,b))
                     except Exception as exc:
                         log('event_publish_retry',error=type(exc).__name__)
-                try:
-                    metrics.unsent.labels(cfg["SITE"]).set(
-                        store.sender.pending_count()
-                    )
-                except Exception as exc:
-                    metrics.unsent.labels(cfg['SITE']).set(float('nan'))
-                    log('unsent_count_error',error=type(exc).__name__)
 
             except Exception as exc:
                 # 원문/계정이 예외 메시지에 포함될 수 있어 예외 종류만 출력한다.
