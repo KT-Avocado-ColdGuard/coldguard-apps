@@ -22,7 +22,7 @@ No ECR or registry digest is claimed. Upload failure also fails CI.
 `ci/security/exceptions.json` starts empty. No example CVE is approved.
 Each exception requires id, package, installed_version, target, image_id, approved_by,
 approval_issue, reason, mitigation, expires_at (YYYY-MM-DD), services.
-Services must contain collector, controller, field-web, central-worker and control-api: this is one shared image.
+Services must contain collector, controller, field-web, central-worker, control-api and control-ui: this is one shared image.
 Expiry begins at 00:00 UTC on the specified date. Changed image IDs require re-review.
 Missing approval fields fail closed; expired/other-image entries never suppress findings.
 Approval text is evidence, not authentication: security reviewers must approve changes

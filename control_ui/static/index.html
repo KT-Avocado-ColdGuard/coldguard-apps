@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ColdGuard 중앙 통제</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="brand-name">AVOCADO HOSPITAL</span>
+    <span class="brand-role">중앙 통제</span>
+  </div>
+  <div class="who" id="who" hidden>
+    <span id="who-name"></span>
+    <button type="button" id="logout" class="link">로그아웃</button>
+  </div>
+</header>
+
+<main>
+  <section id="login" class="panel login" hidden>
+    <h1>관리자 로그인</h1>
+    <p>관리자가 만든 계정으로 로그인하세요. 5번 틀리면 5분 동안 잠깁니다.</p>
+    <form id="login-form" novalidate>
+      <label for="login-user">아이디</label>
+      <input id="login-user" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="30">
+      <label for="login-pass">비밀번호</label>
+      <input id="login-pass" type="password" autocomplete="current-password" maxlength="128">
+      <button type="submit" id="login-submit" class="primary">로그인</button>
+    </form>
+    <p id="login-msg" class="msg error" role="alert"></p>
+  </section>
+
+  <div id="console" hidden>
+    <section class="panel status-bar">
+      <div class="conn">
+        <span class="conn-item">통제 API <span id="conn-api" class="badge none">확인 중</span></span>
+        <span class="conn-item">중앙 DB <span id="conn-db" class="badge none">확인 중</span></span>
+        <span class="conn-item">중앙 MQTT <span id="conn-mqtt" class="badge none">확인 중</span></span>
+        <span id="status-updated" class="muted"></span>
+      </div>
+      <p id="halt" class="halt" role="alert" hidden></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>냉동고 상태</h2>
+        <span id="devices-updated" class="muted"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="devices">
+          <thead>
+            <tr><th>장비</th><th>상태</th><th>현재 온도</th><th>설정 온도</th><th>문</th><th>냉각</th><th>마지막 측정</th><th>추이·경보</th></tr>
+          </thead>
+          <tbody id="device-rows"></tbody>
+        </table>
+      </div>
+      <p id="devices-msg" class="msg"></p>
+    </section>
+
+    <section class="panel">
+      <h2>설정 온도 변경</h2>
+      <form id="cmd-form" class="cmd-form" autocomplete="off" novalidate>
+        <div class="field">
+          <label for="cmd-device">장비</label>
+          <select id="cmd-device"></select>
+        </div>
+        <div class="field">
+          <label for="cmd-value">새 설정 온도(℃)</label>
+          <input id="cmd-value" type="text" spellcheck="false" placeholder="예: -22.0">
+        </div>
+        <button type="submit" id="cmd-review" class="primary">명령 확인</button>
+      </form>
+      <p class="hint">-50 이상 -10 미만, 소수 둘째 자리까지 넣습니다. 최종 판정은 현장 controller가 합니다. 명령은 사용자당 1분에 10건까지 보낼 수 있고, 실패해도 자동으로 다시 보내지 않습니다.</p>
+      <div id="confirm" class="confirm" hidden>
+        <p id="confirm-text"></p>
+        <p id="confirm-warn" class="warn" hidden></p>
+        <div class="actions">
+          <button type="button" id="confirm-send" class="primary">보내기</button>
+          <button type="button" id="confirm-cancel">취소</button>
+        </div>
+      </div>
+      <p id="cmd-msg" class="msg" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>명령 이력</h2>
+        <label class="inline check"><input type="checkbox" id="only-selected"> 선택한 장비만</label>
+        <span id="commands-updated" class="muted"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="commands">
+          <thead>
+            <tr><th>요청 시각</th><th>장비</th><th>설정 온도</th><th>명령자</th><th>결과</th><th>판정 시각</th></tr>
+          </thead>
+          <tbody id="command-rows"></tbody>
+        </table>
+      </div>
+      <p id="commands-msg" class="msg"></p>
+    </section>
+  </div>
+  <noscript><p class="panel">이 화면은 자바스크립트가 켜져 있어야 동작합니다.</p></noscript>
+</main>
+</body>
+</html>

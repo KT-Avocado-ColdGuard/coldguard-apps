@@ -3,7 +3,7 @@ import datetime as dt
 import json
 import sys
 
-SERVICES = {'collector', 'controller', 'field-web', 'central-worker', 'control-api'}
+SERVICES = {'collector', 'controller', 'field-web', 'central-worker', 'control-api', 'control-ui'}
 
 def evaluate(report, exceptions, image_id, today=None):
     today = today or dt.datetime.now(dt.timezone.utc).date()
