@@ -19,7 +19,7 @@
 - `?device=fz03`을 붙여 열면 그 장비를 미리 고른다.
 
 ## 보안
-- 로그인 필수, 자가 가입 없음. 계정은 관리자가 계정 도구로 만든다.
+- 로그인 필수, 자가 가입 없음. 비밀번호 해시는 계정 주인이 계정 도구로 만들고, 계정 파일은 관리자가 배포한다.
 - 비밀번호: 12자 이상, 영문 대문자·소문자·숫자·기호 포함, 계정 ID 미포함. 해시(scrypt)만 저장한다.
 - 같은 계정 ID로 5번 연속 실패하면 5분 잠금. 없는 계정 ID도 똑같이 잠가서 계정이 있는지 드러나지 않는다.
 - 세션: 2시간 동안 사용하지 않거나 로그인 후 하루가 지나면 끝난다. 15초 자동 갱신은 사용 시간에 넣지 않는다(화면을 켜 둔 채 자리를 비우면 로그아웃).
@@ -58,24 +58,36 @@
 키 파일과 계정 파일은 권한 600이어야 기동한다(그룹·다른 사용자가 읽을 수 있으면 거부). 키 파일에는 키 한 줄만 두며, 끝의 줄바꿈(`\r` 포함)은 서버가 지운다.
 
 ## 허브 배포
-허브 compose 폴더(`/opt/coldguard-hub`)에 비밀 파일 폴더를 만들고 키 파일을 넣는다. 주인은 컨테이너 사용자(uid 10001)다.
+허브에는 모니터링 스택과 따로 compose 파일 하나로 올린다. 이미지 받기, 비밀 파일 배포, 실행(`docker compose up`), tailscale serve는 IaC 담당의 Ansible이 한 곳에서 맡는다. 이미지를 받는 곳과 실행하는 곳이 같아야 digest를 한 군데서만 바꾸면 되기 때문이다.
+
+| 허브 경로 | 내용 | 권한 |
+|---|---|---|
+| `/opt/coldguard-control-ui/compose.yaml` | 아래 compose 파일 | |
+| `/opt/coldguard-control-ui/secrets/` | 비밀 파일 폴더(컨테이너의 `/etc/control-ui`에 읽기 전용으로 마운트) | 700, uid·gid 10001 |
+| `/opt/coldguard-control-ui/secrets/api-key` | kt-ui 키 한 줄 | 600, uid·gid 10001 |
+| `/opt/coldguard-control-ui/secrets/accounts.json` | 계정 파일 | 600, uid·gid 10001 |
+
+- 폴더도 컨테이너 사용자(uid 10001)의 것이어야 한다. 파일만 600이고 폴더가 root 전용이면 컨테이너가 파일을 읽지 못한다.
+- 비밀 파일 두 개는 Ansible Vault에서 배포한다. 허브에서 직접 고치면 다음 Ansible 실행 때 덮어쓰인다.
+- 이미지는 허브 전용 Pull 사용자(`coldguard-prod-kt-hub-ecr-pull`)로 ECR에 로그인한 뒤 digest로 받는다. ECR 로그인 토큰은 12시간만 유효하다.
+
+### 계정 만들기·비밀번호 바꾸기
+비밀번호는 계정 주인이 자기 PC에서 직접 넣고, 해시만 든 파일을 IaC 담당에게 보낸다(디스코드가 아닌 별도 경로). IaC 담당은 받은 파일들을 JSON 객체 하나로 합쳐 Vault에 넣는다.
 
 ```bash
-install -d -m 700 -o 10001 -g 10001 /opt/coldguard-hub/control-ui
-install -m 600 -o 10001 -g 10001 api-key /opt/coldguard-hub/control-ui/api-key
+python -m pip install werkzeug
+python -m control_ui.accounts --file ../monitoring.json add monitoring
 ```
 
-계정은 같은 이미지로 한 번 실행해 만든다. 비밀번호는 계정 주인이 직접 입력한다.
+- 앱 저장소 맨 위 폴더에서 실행한다. werkzeug 말고 다른 패키지는 필요 없다.
+- 파일은 저장소 밖(한 단계 위 폴더)에 만든다. 저장소 안에 두면 실수로 커밋될 수 있다.
+- Windows에서는 PowerShell이나 cmd에서 실행한다. Git Bash에서는 입력하는 비밀번호가 화면에 보일 수 있다.
+- 비밀번호를 바꿀 때는 같은 파일에 `passwd`(예: `--file ../monitoring.json passwd monitoring`)를 쓰고, 같은 방법으로 보낸다.
+- 서버는 계정 파일이 바뀌면 재시작 없이 다시 읽고, 지웠거나 비밀번호가 바뀐 계정의 로그인 세션을 끝낸다.
 
-```bash
-docker run --rm -it -v /opt/coldguard-hub/control-ui:/etc/control-ui <이미지> python -m control_ui.accounts add <계정ID>
-```
-
-`passwd`(비밀번호 변경), `remove`(삭제), `list`(목록)도 같은 방식이다. 서버가 떠 있어도 바로 반영된다.
-
-compose 서비스 예시:
-
+### compose 파일
 ```yaml
+name: coldguard-control-ui
 services:
   control-ui:
     image: <ECR 레지스트리>/coldguard-prod-control-ui@sha256:<digest>
@@ -88,10 +100,11 @@ services:
       STALE_SEC: "<시설과 같은 값>"
       GRAFANA_DEVICE_URL: http://coldguard-kt-hub.<tailnet>.ts.net:3000/d/cg-dev?var-site={site}&var-device={device}
     volumes:
-      - ./control-ui:/etc/control-ui:ro
+      - ./secrets:/etc/control-ui:ro
     ports:
       - "127.0.0.1:8081:8081"  # 화면은 허브 안에서만 연다. 테일넷에는 tailscale serve로 붙인다
       # 9205(/metrics)는 내보내지 않는다. 같은 docker 네트워크의 Prometheus가 control-ui:9205로 수집한다
+    networks: [monitoring]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -101,11 +114,16 @@ services:
       interval: 30s
       timeout: 5s
     restart: unless-stopped
+
+networks:
+  monitoring:
+    external: true  # 모니터링 compose가 만든 네트워크에 붙는다
+    name: <모니터링 네트워크 이름>
 ```
 
-- 모니터링 스택과 같은 docker 네트워크에 둔다(같은 compose 파일이면 기본 네트워크). Prometheus 수집 대상은 `control-ui:9205`, 상태 점검은 `http://control-ui:8081/healthz`다.
+- Prometheus 수집 대상은 `control-ui:9205`, 상태 점검은 `http://control-ui:8081/healthz`다. 같은 네트워크 안에서 서비스 이름으로 찾는다.
 - 테일넷 공개는 허브에서 `tailscale serve --bg --https=8080 http://127.0.0.1:8081`로 한다. 주소는 `https://coldguard-kt-hub.<tailnet>.ts.net:8080`이고, 접속은 보안 ACL(control-users → kt-hub:8080)이 정한다. Funnel은 켜지 않는다.
-- 컨테이너에서 통제 API 주소의 이름 풀이가 되는지 배포 때 확인한다(화면의 연결 상태가 "끊김"이면 로그의 `control_ui_api_unreachable`을 본다).
+- 컨테이너에서 통제 API 주소의 이름 풀이가 되는지 배포 때 확인한다. 화면의 연결 상태가 "끊김"이면 로그의 `control_ui_api_unreachable`을 본다.
 
 ## 지표 (`METRICS_PORT`, 기본 9205)
 | 이름 | 라벨 `result` |
