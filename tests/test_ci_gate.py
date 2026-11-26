@@ -11,7 +11,7 @@ class GateTests(unittest.TestCase):
         self.exception = dict(id='TEST-1', package='pkg', installed_version='1', target='os',
             image_id='sha256:test', approved_by='test reviewer', approval_issue='test-only',
             reason='fixture', mitigation='fixture', expires_at='2030-02-01',
-            services=['collector', 'controller', 'field-web', 'central-worker', 'control-api'])
+            services=['collector', 'controller', 'field-web', 'central-worker', 'control-api', 'control-ui'])
     def check(self, exceptions):
         return evaluate(self.report, exceptions, 'sha256:test', dt.date(2030, 1, 1))
     def test_high_and_critical_block(self):
@@ -34,10 +34,10 @@ class GateTests(unittest.TestCase):
         for report in ({}, {'SchemaVersion': 2, 'Results': []}):
             with self.assertRaises(ValueError): evaluate(report, [], 'image')
     def test_exception_without_central_worker_is_rejected(self):
-        # 공통 이미지의 다섯 서비스 중 중앙 워커 승인이 빠지면 거부한다.
+        # 공통 이미지의 여섯 서비스 중 중앙 워커 승인이 빠지면 거부한다.
         exception = {
             **self.exception,
-            'services': ['collector', 'controller', 'field-web', 'control-api'],
+            'services': ['collector', 'controller', 'field-web', 'control-api', 'control-ui'],
         }
 
         with self.assertRaises(ValueError):
@@ -47,11 +47,35 @@ class GateTests(unittest.TestCase):
         # 통제 API도 같은 이미지를 쓰므로 예외 승인에서 빠지면 거부한다.
         exception = {
             **self.exception,
-            'services': ['collector', 'controller', 'field-web', 'central-worker'],
+            'services': ['collector', 'controller', 'field-web', 'central-worker', 'control-ui'],
         }
 
         with self.assertRaises(ValueError):
             self.check([exception])
+
+    def test_exception_without_control_ui_is_rejected(self):
+        # 통제 UI도 같은 이미지를 쓰므로 예외 승인에서 빠지면 거부한다.
+        exception = {
+            **self.exception,
+            'services': ['collector', 'controller', 'field-web', 'central-worker', 'control-api'],
+        }
+
+        with self.assertRaises(ValueError):
+            self.check([exception])
+
+    def test_publish_list_matches_gate_and_image(self):
+        # ECR에 올리는 서비스 목록과 예외 승인 목록이 같아야 하고, 각 서비스 코드가 이미지에 들어 있어야 한다.
+        import pathlib
+        import re
+        from ci.gate import SERVICES
+        root = pathlib.Path(__file__).resolve().parent.parent
+        publish = (root / 'ci/publish.sh').read_text(encoding='utf-8')
+        listed = re.search(r'^for service in (.+); do$', publish, re.M).group(1).split()
+        self.assertEqual(sorted(listed), sorted(SERVICES))
+        dockerfile = (root / 'Dockerfile').read_text(encoding='utf-8')
+        for package in ('common', 'collector', 'controller', 'field_web', 'central_worker', 'control_api',
+                        'control_ui'):
+            self.assertIn(f'COPY {package} ./{package}', dockerfile)
             
 @unittest.skipUnless(
     sys.platform.startswith("linux"),
