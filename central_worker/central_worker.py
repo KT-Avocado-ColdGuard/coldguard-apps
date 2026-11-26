@@ -8,6 +8,8 @@
 - 같은 키로 내용이 다른 데이터가 오면 저장하지 않고 duplicate_conflict로 기록합니다.
   (예: 시뮬레이터 SIM_DB 초기화로 seq가 1부터 다시 시작된 경우)
 - 모니터링용 /metrics를 제공합니다.
+- 처리할 메시지가 없을 때 15초마다 DB 연결을 확인해 db_up 지표를 채웁니다.
+  시설 연결이 끊겨 메시지가 없어도 DB 상태가 맞게 보입니다.
 - 여러 개(HPA 2~4)로 실행합니다. 파드마다 클라이언트 ID가 다르고(StatefulSet 파드 이름),
   기본 개수 밖의 파드(늘어났다 줄어드는 파드)는 종료 전에 구독을 해제하고 받은 메시지를 모두 처리합니다.
 - 회수 모드(DRAIN_ONLY=true): 지정한 파드 ID의 세션에 남은 메시지만 저장하고 끝냅니다.
@@ -33,6 +35,7 @@ SHARE_GROUP = 'central-worker'
 SEVERITIES = ('info', 'warning', 'critical')
 RESULTS = ('accepted', 'rejected')
 DUPLICATE_KEY = 1062  # MySQL ER_DUP_ENTRY
+DB_CHECK_SEC = 15  # 처리할 메시지가 없을 때 DB 연결을 확인하는 간격(초). 지표 수집 간격과 같다.
 
 
 def now():
@@ -249,6 +252,21 @@ class Store(Database):
                 pass
             self.db = None
 
+    def ping(self):
+        """DB에 가볍게 물어 연결을 확인한다. 실패하면 연결을 끊고 예외를 그대로 올린다."""
+        db = self.connection()
+        try:
+            cur = db.cursor()
+            try:
+                cur.execute('SELECT 1', ())
+                cur.fetchall()  # 결과를 다 읽어야 같은 연결로 다음 쿼리를 보낼 수 있다.
+            finally:
+                cur.close()
+            db.rollback()  # autocommit=False라서 읽기 트랜잭션을 정리한다.
+        except Exception:
+            self.close()
+            raise
+
     def save(self, channel, row):
         insert, select, keys = TABLES[channel]
         db = self.connection()
@@ -302,7 +320,8 @@ class Metrics:
         self.registry = CollectorRegistry()
         self.count = Counter('coldguard_central_messages_total', '처리 건수',
                              ('channel', 'result'), registry=self.registry)
-        self.db_up = Gauge('coldguard_central_db_up', '마지막 DB 처리 성공 여부', registry=self.registry)
+        self.db_up = Gauge('coldguard_central_db_up', 'DB 연결 상태(저장 결과, 메시지가 없을 때는 15초마다 확인)',
+                           registry=self.registry)
         self.mqtt_up = Gauge('coldguard_central_mqtt_up', 'MQTT 연결 여부', registry=self.registry)
         self.server, self.thread = start_http_server(cfg['METRICS_PORT'], addr=cfg['METRICS_HOST'],
                                                      registry=self.registry)
@@ -328,6 +347,25 @@ def main():
     deadline = now() + cfg['DRAIN_SEC'] if cfg['DRAIN_ONLY'] else 0.0
     if cfg['DRAIN_ONLY']:
         log('recover_start', client_id=cfg['MQTT_CLIENT_ID'])
+
+    # 메시지가 오가는 동안은 저장 결과가 db_up을 채운다. 메시지가 없으면(시설 단절, 재시작 직후)
+    # db_up이 시작값 0이나 마지막 값에 머물러 DB가 멀쩡해도 끊김 알림이 울리므로, 쉬는 틈에 직접 확인한다.
+    db_check = {'next': 0.0, 'ok': None}
+
+    def check_db():
+        t = time.monotonic()
+        if t < db_check['next']:
+            return
+        db_check['next'] = t + DB_CHECK_SEC
+        try:
+            store.ping()
+            ok, fields = True, {}
+        except Exception as exc:
+            ok, fields = False, {'error': type(exc).__name__}
+        metrics.db_up.set(1 if ok else 0)
+        if ok != db_check['ok']:  # 상태가 바뀔 때만 남긴다(15초마다 같은 줄이 쌓이지 않게).
+            log('db_check', ok=ok, **fields)
+        db_check['ok'] = ok
 
     def request_unsubscribe(c):
         # Mark before sending: the network callback may run immediately.
@@ -415,6 +453,8 @@ def main():
                     pending = inbox.get(timeout=0.2)
                     state['last'] = now()
                 except queue.Empty:
+                    if not state['draining']:
+                        check_db()  # 종료 처리 중에는 남은 메시지만 처리하고 끝낸다.
                     continue
             try:
                 try:

@@ -51,6 +51,8 @@ class FakeCursor:
 
     def execute(self, sql, args):
         self.conn.calls.append(sql.split()[0])
+        if sql == 'SELECT 1' and self.conn.fail:
+            raise self.conn.fail
         if sql.startswith('INSERT'):
             if self.conn.fail:
                 raise self.conn.fail
@@ -59,6 +61,9 @@ class FakeCursor:
 
     def fetchone(self):
         return self.conn.existing
+
+    def fetchall(self):
+        return [(1,)]
 
     def close(self):
         pass
@@ -225,6 +230,29 @@ class StoreTest(unittest.TestCase):
             store.save('telemetry', self.row)
         self.assertIsNone(store.db)
         self.assertTrue(conn.closed)
+
+    def test_ping_ok_keeps_connection(self):
+        conn = FakeConn()
+        store = FakeStore(conn)
+        store.ping()
+        self.assertEqual(conn.calls, ['SELECT', 'ROLLBACK'])  # 읽기 트랜잭션을 남기지 않는다
+        self.assertIs(store.db, conn)
+        self.assertFalse(conn.closed)
+
+    def test_ping_failure_closes_connection(self):
+        conn = FakeConn(fail=ConnectionError('down'))
+        store = FakeStore(conn)
+        with self.assertRaises(ConnectionError):
+            store.ping()
+        self.assertIsNone(store.db)  # 다음 확인이나 저장에서 새로 연결한다
+        self.assertTrue(conn.closed)
+
+    def test_ping_connect_failure(self):
+        store = FakeStore(FakeConn())
+        store.connect = Mock(side_effect=ConnectionError('refused'))
+        with self.assertRaises(ConnectionError):
+            store.ping()
+        self.assertIsNone(store.db)
 
 
 def confirm_unsubscribe(client):
@@ -451,6 +479,113 @@ class UnsubscribeTest(unittest.TestCase):
                     else:
                         self.assertEqual(result, 1)
                         self.assertNotIn('drain_done', events)
+
+
+class DbCheckTest(unittest.TestCase):
+    """메시지가 없을 때의 DB 확인. 시설 단절로 메시지가 끊겨도 db_up이 실제 DB 상태를 따라야 한다."""
+
+    @staticmethod
+    def connect_on_start(client):
+        ok = SimpleNamespace(is_failure=False)
+        client.loop_start.side_effect = lambda: client.on_connect(client, None, None, ok, None)
+
+    def test_idle_check_follows_db_state(self):
+        # 기본 파드(0번)가 메시지 없이 도는 동안 확인 결과를 차례로 받는다: 정상 → 끊김 2번 → 복구.
+        cfg = cw.settings({'MQTT_PASS': 'test', 'MYSQL_PASSWORD': 'test',
+                           'MQTT_CLIENT_ID': 'central-worker-0'})
+        client = Mock()
+        self.connect_on_start(client)
+        handlers = {}
+        results = iter([None, ConnectionError('down'), ConnectionError('down'), None])
+
+        def ping():
+            result = next(results, 'end')
+            if result == 'end':  # 확인을 다 돌았으면 종료 신호를 보낸다
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            elif result is not None:
+                raise result
+
+        store, metrics = Mock(), Mock()
+        store.ping.side_effect = ping
+        # 확인이 돌지 않는 회귀가 생겨도 시험이 멈추지 않고 실패하도록 5초 뒤에는 종료 신호를 보낸다.
+        guard = threading.Timer(5, lambda: handlers[signal.SIGTERM](signal.SIGTERM, None))
+        with (
+            patch.object(cw, 'settings', return_value=cfg),
+            patch.object(cw, 'mqtt_client', return_value=client),
+            patch.object(cw, 'Store', return_value=store),
+            patch.object(cw, 'Metrics', return_value=metrics),
+            patch.object(cw.signal, 'signal',
+                         side_effect=lambda sig, handler: handlers.__setitem__(sig, handler)),
+            patch.object(cw, 'DB_CHECK_SEC', 0),
+            patch.object(cw, 'log') as logs,
+        ):
+            guard.start()
+            try:
+                result = cw.main()
+            finally:
+                guard.cancel()
+
+        self.assertEqual(result, 0)
+        self.assertEqual([c.args[0] for c in metrics.db_up.set.call_args_list], [1, 0, 0, 1, 1])
+        # 로그는 상태가 바뀔 때만 남는다(끊김 2번 중 1번, 마지막 정상 2번 중 1번).
+        checks = [c.kwargs for c in logs.call_args_list if c.args[0] == 'db_check']
+        self.assertEqual(checks, [{'ok': True}, {'ok': False, 'error': 'ConnectionError'},
+                                  {'ok': True}])
+        client.ack.assert_not_called()
+
+    def test_check_waits_for_interval(self):
+        # 기본 간격에서는 0.2초마다 도는 반복마다 DB에 묻지 않는다.
+        cfg = cw.settings({'MQTT_PASS': 'test', 'MYSQL_PASSWORD': 'test',
+                           'MQTT_CLIENT_ID': 'central-worker-0'})
+        client = Mock()
+        self.connect_on_start(client)
+        handlers = {}
+        store = Mock()
+        loops = itertools.count()
+
+        def get(timeout):
+            if next(loops) == 5:  # 빈 반복 5번 뒤 종료
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            raise cw.queue.Empty
+
+        inbox = Mock()
+        inbox.get.side_effect = get
+        with (
+            patch.object(cw, 'settings', return_value=cfg),
+            patch.object(cw, 'mqtt_client', return_value=client),
+            patch.object(cw, 'Store', return_value=store),
+            patch.object(cw, 'Metrics'),
+            patch.object(cw.signal, 'signal',
+                         side_effect=lambda sig, handler: handlers.__setitem__(sig, handler)),
+            patch.object(cw.queue, 'Queue', return_value=inbox),
+        ):
+            result = cw.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(store.ping.call_count, 1)  # 시작 직후 한 번만
+
+    def test_no_check_while_draining(self):
+        # 회수 모드(종료 처리 중)는 남은 메시지만 처리한다. DB 확인으로 끝내는 시간을 늦추지 않는다.
+        cfg = cw.settings({'MQTT_PASS': 'test', 'MYSQL_PASSWORD': 'test',
+                           'MQTT_CLIENT_ID': 'central-worker-3', 'DRAIN_ONLY': 'true'})
+        client = Mock()
+        confirm_unsubscribe(client)
+        self.connect_on_start(client)
+        store = Mock()
+        clock = itertools.count(1000)
+        with (
+            patch.object(cw, 'settings', return_value=cfg),
+            patch.object(cw, 'mqtt_client', return_value=client),
+            patch.object(cw, 'Store', return_value=store),
+            patch.object(cw, 'Metrics'),
+            patch.object(cw.signal, 'signal'),
+            patch.object(cw, 'now', side_effect=lambda: next(clock)),
+            patch.object(cw, 'DB_CHECK_SEC', 0),
+        ):
+            result = cw.main()
+
+        self.assertEqual(result, 0)
+        store.ping.assert_not_called()
 
 
 if __name__ == '__main__':
