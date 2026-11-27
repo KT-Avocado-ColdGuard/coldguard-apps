@@ -2,7 +2,7 @@
 LIMIT = -25.0
 WINDOW = 60.0
 EARLY_SEC = 50.0
-HOLD_SEC = 10.0
+HOLD_SEC = 0.0
 SIM_RISE = 0.04  # 시뮬레이터와 공유하는 문 열림 상승 속도 (°C/초)
 
 def analyze(old, msg, received, stale_sec):

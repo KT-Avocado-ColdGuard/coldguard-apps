@@ -161,7 +161,7 @@ class Freezer:
     def check_alarm(self, now):
         """최근 60초 선형 회귀로 -25도 도달 시간을 예상한다.
 
-        문을 연 뒤 60초의 관측을 확보하고, 예상 시간이 50초 이하인 상태가
+        문을 연 뒤 60초의 관측을 확보하고, 예상 시간이 120초 이하인 상태가
         연속 10초 유지될 때만 조기 경보를 켠다. 고온 경보는 실측값으로 판단한다.
         """
         self.eta = None
@@ -192,7 +192,7 @@ class Freezer:
             slope = sum((x - x_avg) * (y - y_avg) for x, y in zip(xs, ys)) / denom
             if slope > 0:
                 self.eta = (LIMIT - self.temp) / slope
-        if span >= 60 and self.eta is not None and self.eta <= 50:
+        if span >= 60 and self.eta is not None and self.eta <= 120:
             if self.risk_at is None:
                 self.risk_at = now
             self.early = now - self.risk_at >= 10
