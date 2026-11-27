@@ -123,11 +123,20 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(self.sample(temp=-25, door=False)['status'], 'normal')
         self.assertEqual(self.sample(temp=-24.9, door=False)['status'], 'hot')
 
-    def test_prediction_requires_window_and_hold(self):
+    def test_prediction_requires_window(self):
+        # 60초 관측 전에는 예측하지 않고, 채우면 남은 시간 50초 이하인 즉시 경보(유지 시간 없음)
         state = None
-        for second in range(71):
+        for second in range(61):
             state = self.sample(state, second, -29 + second * .04)
-            self.assertEqual(state['status'], 'early' if second == 70 else 'normal')
+            self.assertEqual(state['status'], 'early' if second == 60 else 'normal')
+
+    def test_prediction_at_fifty_seconds(self):
+        # -30℃에서 0.04℃/초: 60초엔 남은 시간 65초 → 75초(-27℃, 50초 남음)에 경보
+        state = None
+        for second in range(76):
+            state = self.sample(state, second, -30 + second * .04)
+            self.assertEqual(state['status'], 'early' if second == 75 else 'normal', second)
+        self.assertLessEqual(state['eta'], 50)
 
     def test_flat_or_falling_no_prediction(self):
         for slope in (0, -.01):
